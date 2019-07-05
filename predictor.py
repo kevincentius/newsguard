@@ -1,0 +1,204 @@
+
+from sklearn.externals import joblib
+
+import json
+import urllib
+import requests
+import lxml.html
+import re
+import math
+
+from time import time
+
+from threading import Lock
+
+from ng_repo import repository
+
+class Predictor:
+	fields = {
+		'Alexa Reach Rank': 'int',
+		'Alexa USA Rank': 'int',
+		'Canonical URL': 'str',
+		'Citation Flow': 'int',
+		'DMOZ.org listed': 'bool',
+		'Domain Analysis For': 'str',
+		'Domain Authority': 'int',
+		'EDU Backlinks': 'int',
+		'EDU Domains': 'int',
+		'External Backlinks': 'int',
+		'GOV Backlinks': 'int',
+		'GOV Domains': 'int',
+		'Global Rank': 'int',
+		'Google Directory listed': 'bool',
+		'Google PageRank': 'int',
+		'Indexed URLs': 'int',
+		'PR Quality': 'str',
+		'Page Authority': 'int',
+		'Referring Domains': 'int',
+		'Root IP': 'str',
+		'Spam Score': 'int',
+		'Topic Value': 'int',
+		'Topic': 'str',
+		'Trust Flow': 'int',
+		'Trust Metric': 'int',
+		'cPR Score': 'float'
+	}
+
+	x_cols = [
+		'Google PageRank',
+		'cPR Score',
+		'Domain Authority',
+		'Page Authority',
+		'Trust Metric',
+		'Trust Flow',
+		'Citation Flow',
+		'Global Rank',
+		'Alexa USA Rank',
+		'Alexa Reach Rank',
+		'Spam Score',
+		'External Backlinks',
+		'Referring Domains',
+		'EDU Backlinks',
+		'EDU Domains',
+		'GOV Backlinks',
+		'GOV Domains',
+		'Topic Value',
+		'Indexed URLs'
+	]
+
+	log_cols = [
+		'Global Rank',
+		'Alexa USA Rank',
+		'Alexa Reach Rank',
+		'External Backlinks',
+		'Referring Domains',
+		'EDU Backlinks',
+		'EDU Domains',
+		'GOV Backlinks',
+		'GOV Domains',
+		'Indexed URLs'
+	]
+
+
+	def __init__(self):
+		self.last_query = 0
+		self.lock = Lock()
+		self.queue = []
+
+		self.model = joblib.load('linear-noft-sw-5.joblib')
+
+	def predict(self, link):
+		ident = self.clean_url(link)
+
+		data = repository.get(ident)
+		if data is None:
+			features = self.fetch_features(ident)
+
+			# features = {'Domain Analysis For': 'harddrop.com', 'Google PageRank': 4, 'cPR Score': 4.4, 'Domain Authority': 44, 'Page Authority': 38, 'Trust Flow': 21, 'Trust Metric': 21, 'Global Rank': 188216, 'Alexa USA Rank': 59853, 'Alexa Reach Rank': 186334, 'Spam Score': 5, 'External Backlinks': 119770, 'Referring Domains': 321, 'EDU Backlinks': 0, 'EDU Domains': 0, 'GOV Backlinks': 0, 'GOV Domains': 0, 'PR Quality': 'Moderate', 'Canonical URL': 'harddrop.com/', 'Root IP': '192.30.32.125', 'Topic': 'Arts/Animation',
+			# 	'Topic Value': 19, 'Indexed URLs': 513357, 'Google Directory listed': True, 'DMOZ.org listed': False, 'Citation Flow': '37'}
+
+			inp = []
+			for col in Predictor.x_cols:
+				if col in Predictor.log_cols:
+					inp.append(math.log10(max(0,float(features[col]))+1))
+				else:
+					inp.append(float(features[col]))
+			
+			score = self.model.predict([inp])
+			print(inp)
+			print(score)
+
+			data = {
+				'lastUpdated': time(),
+				'score': score,
+				'features': features
+			}
+
+	def fetch_features(self, ident):
+		print(ident)
+
+		# post request
+		payload = {'name': ident}
+		r = requests.post("https://checkpagerank.net/check-page-rank.php/POST", data=payload)
+
+		# save response --> r.text
+
+		# extract pdf
+		doc = lxml.html.fromstring(r.text)
+
+		elem = list(doc.xpath('//div[@id="html-2-pdfwrapper"]'))[0]
+		pdf = elem.text_content()
+		
+		features = self.read_cpr_pdf(pdf)
+		features['Citation Flow'] = re.search(r'<div class="col-md-5">Citation Flow: ([0-9]*)<\/div>', r.text).group(1)
+
+		print(features)
+
+		return features
+	
+	def read_cpr_pdf(self, pdf):
+		# read cpr pdf and split into entries
+		pat = re.compile('\\s*(.*:)\\s*')
+		vals = pat.split(pdf)
+
+		doc = {}
+		j = 0
+		while j < len(vals):
+			if ':' in vals[j]:
+				key = vals[j][:-1]
+
+				if key in self.fields:
+					val_str = vals[j+1]
+					field_type = self.fields[key]
+
+					val = []
+					if field_type == 'int':
+						if val_str == 'N/A' or len(val_str) == 0:
+							val = None
+						elif len(val_str.split('/')[0].strip().replace(',', '')) == 0:
+							print('val_str is empty', key, val_str)
+						else:
+							val = int(val_str.split('/')[0].strip().replace(',', ''))
+					elif field_type == 'float':
+						if val_str == 'N/A' or len(val_str) == 0:
+							val = None
+						elif len(val_str.split('/')[0].strip().replace(',', '')) == 0:
+							print('val_str is empty', key, val_str)
+						else:
+							val = float(val_str.split('/')[0].strip())
+					elif field_type == 'bool':
+						if val_str.strip() == 'YES':
+							val = True
+						elif val_str.strip() == 'NO':
+							val = False
+					elif field_type == 'str':
+						val = val_str
+					
+					if val is list:
+						raise key + ': ' + val_str
+					doc[key] = val
+
+			j += 1
+		
+		return doc
+
+	def clean_url(self, url):
+		##########################################################
+		# remove "http(s)://" prefix and "/" suffix
+		##########################################################
+		if url[:7] == 'http://':
+			url = url[7:]
+		elif url[:8] == 'https://':
+			url = url[8:]
+
+		# remove www.
+		if url[:4] == 'www.':
+			url = url[4:]
+
+		if url[-1] == '/':
+			url = url[:-1]
+
+		return url.split('/')[0]
+
+predictor = Predictor()
+predictor.predict('dctribune.org')
