@@ -17,4 +17,7 @@ class Repository:
 			{ '_id': domain }
 		)
 
+	def save(self, doc):
+		col.insert_one(doc)
+
 repository = Repository()

@@ -7,20 +7,25 @@ import requests
 import lxml.html
 import re
 import math
+from collections import deque
 
-from time import time
+from time import time, sleep
 
-from threading import Lock
+from threading import Thread, Lock
 
 from ng_repo import repository
 
+def main_loop():
+	predictor.main_loop()
+
 class Predictor:
+	max_queue = 1000
+
 	fields = {
 		'Alexa Reach Rank': 'int',
 		'Alexa USA Rank': 'int',
 		'Canonical URL': 'str',
 		'Citation Flow': 'int',
-		'DMOZ.org listed': 'bool',
 		'Domain Analysis For': 'str',
 		'Domain Authority': 'int',
 		'EDU Backlinks': 'int',
@@ -83,9 +88,92 @@ class Predictor:
 	def __init__(self):
 		self.last_query = 0
 		self.lock = Lock()
-		self.queue = []
+		self.queue = deque([])
+		self.running = False
 
 		self.model = joblib.load('linear-noft-sw-5.joblib')
+
+	def request(self, link):
+		ident = self.clean_url(link)
+		
+		data = repository.get(ident)
+		if data is not None:
+			print('request known')
+			del data['_id']
+			data['query'] = link
+			data['domain'] = ident
+			return data
+
+		else:
+			self.lock.acquire()
+			if self.running or time() < self.last_query + 30:
+				print('request enqueue')
+				# enqueue
+				if ident in self.queue:
+					queue = self.queue.index(ident) + 1
+				elif len(self.queue) < Predictor.max_queue:
+					self.queue.append(ident)
+					queue = len(self.queue)
+				else:
+					queue = -1
+
+				# trigger if not running
+				if not self.running:
+					self.running = True
+					Thread(target=main_loop).start()
+
+				self.lock.release()
+				return {
+					'query': link,
+					'domain': ident,
+					'queue': queue
+				}
+
+			else:
+				print('request immediate')
+				score, features = self.predict(ident)
+				self.last_query = time()
+				self.lock.release()
+				return {
+					'query': link,
+					'domain': ident,
+					'score': score,
+					'features': features
+				}
+
+	def enqueue(self, link):
+		self.lock.acquire()
+		self.queue.append(link)
+		self.lock.release()
+
+		self.trigger()
+
+	def trigger(self):
+		self.lock.acquire()
+		if not self.running:
+			self.running = True
+			Thread(target='main_loop')
+		self.lock.release()
+
+	def main_loop(self):
+		while True:
+			tts = self.last_query + 30 - time()
+			if tts > 0:
+				print('sleeping for', tts, 'seconds')
+				sleep(self.last_query + 30 - time())
+			
+			ident = self.queue.popleft()
+			self.predict(ident)
+
+			self.lock.acquire()
+			if len(self.queue) == 0:
+				self.running = False
+				self.lock.release()
+				break
+			else:
+				self.lock.release()
+
+			self.last_query = time()
 
 	def predict(self, link):
 		ident = self.clean_url(link)
@@ -104,35 +192,39 @@ class Predictor:
 				else:
 					inp.append(float(features[col]))
 			
-			score = self.model.predict([inp])
-			print(inp)
-			print(score)
+			score = self.model.predict([inp])[0]
 
 			data = {
+				'_id': ident,
 				'lastUpdated': time(),
 				'score': score,
 				'features': features
 			}
+			repository.save(data)
+		
+		return data['score'], data['features']
 
 	def fetch_features(self, ident):
-		print(ident)
+		print('fetching', ident)
 
 		# post request
 		payload = {'name': ident}
 		r = requests.post("https://checkpagerank.net/check-page-rank.php/POST", data=payload)
 
-		# save response --> r.text
+		try:
+			# extract pdf
+			doc = lxml.html.fromstring(r.text)
 
-		# extract pdf
-		doc = lxml.html.fromstring(r.text)
+			elem = list(doc.xpath('//div[@id="html-2-pdfwrapper"]'))[0]
+			pdf = elem.text_content()
+			
+			features = self.read_cpr_pdf(pdf)
+			features['Citation Flow'] = re.search(r'<div class="col-md-5">Citation Flow: ([0-9]*)<\/div>', r.text).group(1)
 
-		elem = list(doc.xpath('//div[@id="html-2-pdfwrapper"]'))[0]
-		pdf = elem.text_content()
-		
-		features = self.read_cpr_pdf(pdf)
-		features['Citation Flow'] = re.search(r'<div class="col-md-5">Citation Flow: ([0-9]*)<\/div>', r.text).group(1)
+			print(features)
 
-		print(features)
+		except:
+			raise Exception(r.text)
 
 		return features
 	
@@ -201,4 +293,43 @@ class Predictor:
 		return url.split('/')[0]
 
 predictor = Predictor()
-predictor.predict('dctribune.org')
+
+# first --> immediate result
+print('first immediate result')
+print(predictor.request('http://harddrop.com/forums/index.php?showtopic=6730'))
+sleep(1)
+
+# second --> enqueue (0)
+print('second enqueue (0)')
+print(predictor.request('bbc.com'))
+sleep(1)
+
+# known --> immediate
+print('known --> immediate')
+print(predictor.request('dctribune.org'))
+
+# third --> enqueue (1)
+print('third enqueue (1)')
+print(predictor.request('https://www.mercurynews.com/2019/07/04/top-images-from-president-donald-trumps-salute-to-america-celebration/'))
+
+# fourth --> enqueue (2)
+print('fourth enqueue (2)')
+print(predictor.request('https://www.wsj.com/articles/trump-delivers-elaborate-fourth-of-july-event-showcasing-military-11562282904'))
+
+# second is now ready
+sleep(30)
+print('second is now ready')
+print(predictor.request('bbc.com'))
+
+# third is not yet ready
+print('third is not yet ready')
+print(predictor.request('https://www.mercurynews.com/2019/07/04/top-images-from-president-donald-trumps-salute-to-america-celebration/'))
+
+#
+sleep(30)
+print('third is now ready')
+print(predictor.request('https://www.mercurynews.com/2019/07/04/top-images-from-president-donald-trumps-salute-to-america-celebration/'))
+
+sleep(30)
+print('fourth is now ready')
+print(predictor.request('https://www.wsj.com/articles/trump-delivers-elaborate-fourth-of-july-event-showcasing-military-11562282904'))
