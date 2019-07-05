@@ -8,6 +8,7 @@ import lxml.html
 import re
 import math
 from collections import deque
+import traceback
 
 from time import time, sleep
 
@@ -163,7 +164,9 @@ class Predictor:
 				sleep(self.last_query + 30 - time())
 			
 			ident = self.queue.popleft()
+			
 			self.predict(ident)
+			retries = 0
 
 			self.lock.acquire()
 			if len(self.queue) == 0:
@@ -176,33 +179,42 @@ class Predictor:
 			self.last_query = time()
 
 	def predict(self, link):
-		ident = self.clean_url(link)
+		try:
+			ident = self.clean_url(link)
 
-		data = repository.get(ident)
-		if data is None:
-			features = self.fetch_features(ident)
+			data = repository.get(ident)
+			if data is None:
+				features = self.fetch_features(ident)
 
-			# features = {'Domain Analysis For': 'harddrop.com', 'Google PageRank': 4, 'cPR Score': 4.4, 'Domain Authority': 44, 'Page Authority': 38, 'Trust Flow': 21, 'Trust Metric': 21, 'Global Rank': 188216, 'Alexa USA Rank': 59853, 'Alexa Reach Rank': 186334, 'Spam Score': 5, 'External Backlinks': 119770, 'Referring Domains': 321, 'EDU Backlinks': 0, 'EDU Domains': 0, 'GOV Backlinks': 0, 'GOV Domains': 0, 'PR Quality': 'Moderate', 'Canonical URL': 'harddrop.com/', 'Root IP': '192.30.32.125', 'Topic': 'Arts/Animation',
-			# 	'Topic Value': 19, 'Indexed URLs': 513357, 'Google Directory listed': True, 'DMOZ.org listed': False, 'Citation Flow': '37'}
+				# features = {'Domain Analysis For': 'harddrop.com', 'Google PageRank': 4, 'cPR Score': 4.4, 'Domain Authority': 44, 'Page Authority': 38, 'Trust Flow': 21, 'Trust Metric': 21, 'Global Rank': 188216, 'Alexa USA Rank': 59853, 'Alexa Reach Rank': 186334, 'Spam Score': 5, 'External Backlinks': 119770, 'Referring Domains': 321, 'EDU Backlinks': 0, 'EDU Domains': 0, 'GOV Backlinks': 0, 'GOV Domains': 0, 'PR Quality': 'Moderate', 'Canonical URL': 'harddrop.com/', 'Root IP': '192.30.32.125', 'Topic': 'Arts/Animation',
+				# 	'Topic Value': 19, 'Indexed URLs': 513357, 'Google Directory listed': True, 'DMOZ.org listed': False, 'Citation Flow': '37'}
 
-			inp = []
-			for col in Predictor.x_cols:
-				if col in Predictor.log_cols:
-					inp.append(math.log10(max(0,float(features[col]))+1))
-				else:
-					inp.append(float(features[col]))
+				inp = []
+				for col in Predictor.x_cols:
+					if col in Predictor.log_cols:
+						inp.append(math.log10(max(0,float(features[col]))+1))
+					else:
+						inp.append(float(features[col]))
+				
+				score = self.model.predict([inp])[0]
+
+				data = {
+					'_id': ident,
+					'lastUpdated': time(),
+					'score': score,
+					'features': features
+				}
+				repository.save(data)
 			
-			score = self.model.predict([inp])[0]
-
-			data = {
+			return data['score'], data['features']
+		
+		except:
+			repository.save({
 				'_id': ident,
 				'lastUpdated': time(),
-				'score': score,
-				'features': features
-			}
-			repository.save(data)
-		
-		return data['score'], data['features']
+				'error': traceback.format_exc()
+			})
+			return None, None
 
 	def fetch_features(self, ident):
 		print('fetching', ident)
@@ -294,42 +306,42 @@ class Predictor:
 
 predictor = Predictor()
 
-# first --> immediate result
-print('first immediate result')
-print(predictor.request('http://harddrop.com/forums/index.php?showtopic=6730'))
-sleep(1)
+# # first --> immediate result
+# print('first immediate result')
+# print(predictor.request('http://harddrop.com/forums/index.php?showtopic=6730'))
+# sleep(1)
 
-# second --> enqueue (0)
-print('second enqueue (0)')
-print(predictor.request('bbc.com'))
-sleep(1)
+# # second --> enqueue (0)
+# print('second enqueue (0)')
+# print(predictor.request('bbc.com'))
+# sleep(1)
 
-# known --> immediate
-print('known --> immediate')
-print(predictor.request('dctribune.org'))
+# # known --> immediate
+# print('known --> immediate')
+# print(predictor.request('dctribune.org'))
 
-# third --> enqueue (1)
-print('third enqueue (1)')
-print(predictor.request('https://www.mercurynews.com/2019/07/04/top-images-from-president-donald-trumps-salute-to-america-celebration/'))
+# # third --> enqueue (1)
+# print('third enqueue (1)')
+# print(predictor.request('https://www.mercurynews.com/2019/07/04/top-images-from-president-donald-trumps-salute-to-america-celebration/'))
 
-# fourth --> enqueue (2)
-print('fourth enqueue (2)')
-print(predictor.request('https://www.wsj.com/articles/trump-delivers-elaborate-fourth-of-july-event-showcasing-military-11562282904'))
+# # fourth --> enqueue (2)
+# print('fourth enqueue (2)')
+# print(predictor.request('https://www.wsj.com/articles/trump-delivers-elaborate-fourth-of-july-event-showcasing-military-11562282904'))
 
-# second is now ready
-sleep(30)
-print('second is now ready')
-print(predictor.request('bbc.com'))
+# # second is now ready
+# sleep(30)
+# print('second is now ready')
+# print(predictor.request('bbc.com'))
 
-# third is not yet ready
-print('third is not yet ready')
-print(predictor.request('https://www.mercurynews.com/2019/07/04/top-images-from-president-donald-trumps-salute-to-america-celebration/'))
+# # third is not yet ready
+# print('third is not yet ready')
+# print(predictor.request('https://www.mercurynews.com/2019/07/04/top-images-from-president-donald-trumps-salute-to-america-celebration/'))
 
-#
-sleep(30)
-print('third is now ready')
-print(predictor.request('https://www.mercurynews.com/2019/07/04/top-images-from-president-donald-trumps-salute-to-america-celebration/'))
+# #
+# sleep(30)
+# print('third is now ready')
+# print(predictor.request('https://www.mercurynews.com/2019/07/04/top-images-from-president-donald-trumps-salute-to-america-celebration/'))
 
-sleep(30)
-print('fourth is now ready')
-print(predictor.request('https://www.wsj.com/articles/trump-delivers-elaborate-fourth-of-july-event-showcasing-military-11562282904'))
+# sleep(30)
+# print('fourth is now ready')
+# print(predictor.request('https://www.wsj.com/articles/trump-delivers-elaborate-fourth-of-july-event-showcasing-military-11562282904'))
